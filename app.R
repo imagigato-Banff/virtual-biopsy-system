@@ -1,41 +1,22 @@
 # ============================================================
 # The Virtual Biopsy System - Shiny en castellano
-# Réplica funcional usando los modelos .rds originales de Yoo et al.
+# Versión corregida: recorre correctamente los modelos internos
+# de los .rds originales de Yoo et al.
 # ============================================================
 
-options(shiny.maxRequestSize = 500 * 1024^2)
-
-required_packages <- c(
-  "shiny",
-  "plotly",
-  "DT",
-  "dplyr",
-  "tidyr",
-  "tibble",
-  "purrr",
-  "stringr",
-  "caret",
-  "caretEnsemble",
-  "randomForest",
-  "gbm",
-  "xgboost",
-  "nnet",
-  "MASS"
-)
-
-install_if_missing <- function(pkgs) {
-  missing <- pkgs[!vapply(pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]
-  if (length(missing) > 0) {
-    install.packages(missing, repos = "https://cloud.r-project.org", dependencies = TRUE)
-  }
-  invisible(lapply(pkgs, library, character.only = TRUE))
-}
-
-install_if_missing(required_packages)
-
-# ============================================================
-# Rutas de modelos
-# ============================================================
+library(shiny)
+library(plotly)
+library(DT)
+library(dplyr)
+library(tibble)
+library(purrr)
+library(caret)
+library(caretEnsemble)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(nnet)
+library(MASS)
 
 model_dir <- "models"
 
@@ -49,7 +30,6 @@ model_paths <- list(
 models_available <- all(file.exists(unlist(model_paths)))
 
 loaded_models <- NULL
-
 if (models_available) {
   loaded_models <- list(
     cv   = readRDS(model_paths$cv),
@@ -59,124 +39,157 @@ if (models_available) {
   )
 }
 
-# ============================================================
-# Variables usadas por los modelos originales
-# Orden documentado en el código fuente:
-# Age, Gender, Donor_type, Hypertension, Diabetes, Creatinine,
-# Proteinuria, HCV_status, DCD, bmi, vascular_death
-# ============================================================
-
-base_predictors <- c(
-  "Age",
-  "Gender",
-  "Donor_type",
-  "Hypertension",
-  "Diabetes",
-  "Creatinine",
-  "Proteinuria",
-  "HCV_status",
-  "DCD",
-  "bmi",
-  "vascular_death"
-)
-
-dummy_predictors <- c(
-  "Age",
-  "Gender1",
-  "Donor_type1",
-  "Hypertension1",
-  "Diabetes1",
-  "Creatinine",
-  "Proteinuria1",
-  "HCV_status1",
-  "DCD1",
-  "bmi",
-  "vascular_death1"
-)
-
-# ============================================================
-# Construcción del paciente individual
-# ============================================================
+# ------------------------------------------------------------
+# Entrada: 11 variables documentadas
+# Codificación usada: 0/1, con variantes originales y dummy.
+# ------------------------------------------------------------
 
 make_patient <- function(input) {
   deceased <- input$donor_type == "Fallecido"
 
-  gender <- ifelse(input$sex == "Mujer", 1, 0)
-  donor_type <- ifelse(deceased, 1, 0)
-
-  vascular_death <- ifelse(deceased && input$vascular_death == "Sí", 1, 0)
-  dcd <- ifelse(deceased && input$dcd == "Sí", 1, 0)
-
-  hypertension <- ifelse(input$hypertension == "Sí", 1, 0)
-  diabetes <- ifelse(input$diabetes == "Sí", 1, 0)
-  hcv <- ifelse(input$hcv == "Sí", 1, 0)
-  proteinuria <- ifelse(input$proteinuria == "Sí", 1, 0)
-
   data.frame(
     Age = as.numeric(input$age),
-    Gender = gender,
-    Donor_type = donor_type,
-    Hypertension = hypertension,
-    Diabetes = diabetes,
+    Gender = ifelse(input$sex == "Mujer", 1, 0),
+    Donor_type = ifelse(deceased, 1, 0),
+    Hypertension = ifelse(input$hypertension == "Sí", 1, 0),
+    Diabetes = ifelse(input$diabetes == "Sí", 1, 0),
     Creatinine = as.numeric(input$creatinine),
-    Proteinuria = proteinuria,
-    HCV_status = hcv,
-    DCD = dcd,
+    Proteinuria = ifelse(input$proteinuria == "Sí", 1, 0),
+    HCV_status = ifelse(input$hcv == "Sí", 1, 0),
+    DCD = ifelse(deceased && input$dcd == "Sí", 1, 0),
     bmi = as.numeric(input$bmi),
-    vascular_death = vascular_death,
+    vascular_death = ifelse(deceased && input$vascular_death == "Sí", 1, 0),
     check.names = FALSE
   )
 }
 
-make_candidate_newdata <- function(patient) {
-  numeric_original <- patient[, base_predictors, drop = FALSE]
-
-  factor_original <- numeric_original
-  binary_vars <- setdiff(base_predictors, c("Age", "Creatinine", "bmi"))
-  for (v in binary_vars) {
-    factor_original[[v]] <- factor(as.character(factor_original[[v]]), levels = c("0", "1"))
-  }
-
-  dummy_numeric <- data.frame(
-    Age = patient$Age,
-    Gender1 = patient$Gender,
-    Donor_type1 = patient$Donor_type,
-    Hypertension1 = patient$Hypertension,
-    Diabetes1 = patient$Diabetes,
-    Creatinine = patient$Creatinine,
-    Proteinuria1 = patient$Proteinuria,
-    HCV_status1 = patient$HCV_status,
-    DCD1 = patient$DCD,
-    bmi = patient$bmi,
-    vascular_death1 = patient$vascular_death,
+make_pool <- function(patient) {
+  p <- patient
+  pool <- data.frame(
+    Age = p$Age,
+    Gender = p$Gender,
+    Gender1 = p$Gender,
+    Donor_type = p$Donor_type,
+    Donor_type1 = p$Donor_type,
+    Hypertension = p$Hypertension,
+    Hypertension1 = p$Hypertension,
+    Diabetes = p$Diabetes,
+    Diabetes1 = p$Diabetes,
+    Creatinine = p$Creatinine,
+    Proteinuria = p$Proteinuria,
+    Proteinuria1 = p$Proteinuria,
+    HCV_status = p$HCV_status,
+    HCV_status1 = p$HCV_status,
+    DCD = p$DCD,
+    DCD1 = p$DCD,
+    bmi = p$bmi,
+    vascular_death = p$vascular_death,
+    vascular_death1 = p$vascular_death,
     check.names = FALSE
   )
-
-  dummy_factor <- dummy_numeric
-  binary_dummy <- setdiff(dummy_predictors, c("Age", "Creatinine", "bmi"))
-  for (v in binary_dummy) {
-    dummy_factor[[v]] <- factor(as.character(dummy_factor[[v]]), levels = c("0", "1"))
-  }
-
-  list(
-    numeric_original = numeric_original,
-    factor_original = factor_original,
-    dummy_numeric = dummy_numeric,
-    dummy_factor = dummy_factor
-  )
+  pool
 }
 
-# ============================================================
-# Funciones robustas de predicción
-# ============================================================
+# ------------------------------------------------------------
+# Recoger modelos internos:
+# los .rds finales son contenedores/listas, no siempre objetos
+# predictables directamente. Esta función entra en la lista.
+# ------------------------------------------------------------
+
+collect_predictable_models <- function(x, depth = 0) {
+  if (depth > 6) return(list())
+
+  out <- list()
+
+  if (inherits(x, "train") ||
+      inherits(x, "caretStack") ||
+      inherits(x, "caretEnsemble")) {
+    return(list(x))
+  }
+
+  if (is.list(x)) {
+    # Caso habitual: caretList/lista de modelos caret::train
+    for (i in seq_along(x)) {
+      out <- c(out, collect_predictable_models(x[[i]], depth + 1))
+    }
+  }
+
+  out
+}
+
+# ------------------------------------------------------------
+# Construir newdata compatible con cada modelo concreto.
+# Usa los nombres y tipos de trainingData cuando existen.
+# ------------------------------------------------------------
+
+get_required_predictors <- function(model) {
+  if (!is.null(model$trainingData)) {
+    return(setdiff(names(model$trainingData), ".outcome"))
+  }
+
+  if (!is.null(model$finalModel$xNames)) {
+    return(model$finalModel$xNames)
+  }
+
+  if (!is.null(model$coefnames)) {
+    return(model$coefnames)
+  }
+
+  names(make_pool(data.frame(
+    Age = 50, Gender = 0, Donor_type = 1, Hypertension = 0,
+    Diabetes = 0, Creatinine = 1, Proteinuria = 0, HCV_status = 0,
+    DCD = 0, bmi = 25, vascular_death = 0
+  )))
+}
+
+prepare_newdata_for_model <- function(model, patient) {
+  pool <- make_pool(patient)
+  req <- get_required_predictors(model)
+
+  nd <- data.frame(row.names = 1)
+
+  for (nm in req) {
+    if (nm %in% names(pool)) {
+      nd[[nm]] <- pool[[nm]]
+    } else {
+      # Si el modelo trae algún dummy no previsto, se fuerza a 0.
+      nd[[nm]] <- 0
+    }
+  }
+
+  # Respeta tipos y niveles si caret guardó trainingData.
+  if (!is.null(model$trainingData)) {
+    td <- model$trainingData
+    for (nm in intersect(names(nd), names(td))) {
+      if (is.factor(td[[nm]])) {
+        lev <- levels(td[[nm]])
+        val <- as.character(nd[[nm]][1])
+        if (!val %in% lev) {
+          # Para binarios 0/1, usa el nivel compatible.
+          if (length(lev) >= 2) {
+            val <- ifelse(as.numeric(nd[[nm]][1]) >= 0.5, lev[length(lev)], lev[1])
+          } else {
+            val <- lev[1]
+          }
+        }
+        nd[[nm]] <- factor(val, levels = lev)
+      } else {
+        nd[[nm]] <- suppressWarnings(as.numeric(nd[[nm]]))
+      }
+    }
+  }
+
+  nd
+}
 
 clean_probability_output <- function(p) {
   p <- as.data.frame(p)
+  if (nrow(p) < 1) stop("Salida de probabilidades vacía.")
 
-  if (nrow(p) < 1) stop("La predicción de probabilidades está vacía.")
-
-  names(p) <- gsub("^X", "", names(p))
-  names(p) <- gsub("[^0-9]", "", names(p))
+  nms <- names(p)
+  nms <- gsub("^X", "", nms)
+  nms <- gsub("[^0-9]", "", nms)
+  names(p) <- nms
 
   for (k in as.character(0:3)) {
     if (!k %in% names(p)) p[[k]] <- 0
@@ -197,104 +210,79 @@ clean_probability_output <- function(p) {
   p
 }
 
-try_predict_probability <- function(model_object, patient) {
-  candidates <- make_candidate_newdata(patient)
+predict_probability_ensemble <- function(container, patient) {
+  internal_models <- collect_predictable_models(container)
 
-  possible_objects <- list()
-
-  if (!is.null(model_object$ens_model)) {
-    possible_objects <- c(possible_objects, list(model_object$ens_model))
+  if (length(internal_models) == 0) {
+    stop("El .rds se cargó, pero no contiene modelos predictivos reconocibles.")
   }
 
-  if (!is.null(model_object$models)) {
-    possible_objects <- c(possible_objects, model_object$models)
-  }
+  prob_list <- list()
+  error_list <- c()
 
-  possible_objects <- c(possible_objects, list(model_object))
+  for (m in internal_models) {
+    nd <- prepare_newdata_for_model(m, patient)
 
-  for (obj in possible_objects) {
-    for (nd in candidates) {
-      pred <- tryCatch(
-        predict(obj, newdata = nd, type = "prob"),
-        error = function(e) NULL
-      )
-
-      if (!is.null(pred)) {
-        return(clean_probability_output(pred))
+    pred <- tryCatch(
+      predict(m, newdata = nd, type = "prob"),
+      error = function(e) {
+        error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
+        NULL
       }
+    )
+
+    if (!is.null(pred)) {
+      prob_list[[length(prob_list) + 1]] <- clean_probability_output(pred)
     }
   }
 
-  # Si el ensemble no permite type = "prob", intentamos promediar modelos individuales
-  if (!is.null(model_object$models)) {
-    prob_list <- list()
-
-    for (m in model_object$models) {
-      for (nd in candidates) {
-        pred <- tryCatch(
-          predict(m, newdata = nd, type = "prob"),
-          error = function(e) NULL
-        )
-
-        if (!is.null(pred)) {
-          prob_list[[length(prob_list) + 1]] <- clean_probability_output(pred)
-          break
-        }
-      }
-    }
-
-    if (length(prob_list) > 0) {
-      arr <- simplify2array(lapply(prob_list, as.matrix))
-      mean_prob <- apply(arr, c(1, 2), mean)
-      mean_prob <- as.data.frame(mean_prob)
-      return(clean_probability_output(mean_prob))
-    }
+  if (length(prob_list) == 0) {
+    stop(paste0(
+      "No se pudieron calcular probabilidades con los modelos internos. Primeros errores: ",
+      paste(head(error_list, 3), collapse = " | ")
+    ))
   }
 
-  stop("No se pudieron calcular probabilidades con este modelo.")
+  arr <- simplify2array(lapply(prob_list, as.matrix))
+  mean_prob <- apply(arr, c(1, 2), mean)
+  clean_probability_output(as.data.frame(mean_prob))
 }
 
-try_predict_regression <- function(model_object, patient) {
-  candidates <- make_candidate_newdata(patient)
+predict_regression_ensemble <- function(container, patient) {
+  internal_models <- collect_predictable_models(container)
 
-  possible_objects <- list()
-
-  if (!is.null(model_object$ens_model)) {
-    possible_objects <- c(possible_objects, list(model_object$ens_model))
+  if (length(internal_models) == 0) {
+    stop("El .rds de glomeruloesclerosis no contiene modelos predictivos reconocibles.")
   }
 
-  if (!is.null(model_object$models)) {
-    possible_objects <- c(possible_objects, model_object$models)
-  }
+  vals <- c()
+  error_list <- c()
 
-  possible_objects <- c(possible_objects, list(model_object))
+  for (m in internal_models) {
+    nd <- prepare_newdata_for_model(m, patient)
 
-  values <- c()
-
-  for (obj in possible_objects) {
-    for (nd in candidates) {
-      pred <- tryCatch(
-        predict(obj, newdata = nd),
-        error = function(e) NULL
-      )
-
-      if (!is.null(pred)) {
-        val <- suppressWarnings(as.numeric(pred[1]))
-        if (!is.na(val)) {
-          values <- c(values, val)
-          break
-        }
+    pred <- tryCatch(
+      predict(m, newdata = nd),
+      error = function(e) {
+        error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
+        NULL
       }
+    )
+
+    if (!is.null(pred)) {
+      val <- suppressWarnings(as.numeric(pred[1]))
+      if (!is.na(val)) vals <- c(vals, val)
     }
   }
 
-  if (length(values) == 0) {
-    stop("No se pudo calcular la glomeruloesclerosis.")
+  if (length(vals) == 0) {
+    stop(paste0(
+      "No se pudo calcular glomeruloesclerosis. Primeros errores: ",
+      paste(head(error_list, 3), collapse = " | ")
+    ))
   }
 
-  val <- mean(values, na.rm = TRUE)
-  val <- max(0, min(100, val))
-  val
+  max(0, min(100, mean(vals, na.rm = TRUE)))
 }
 
 predicted_class <- function(prob_row) {
@@ -330,132 +318,61 @@ clinical_interpretation <- function(probs, glo) {
   for (nm in names(probs)) {
     p <- probs[[nm]]
     cls <- predicted_class(p)
-    p_sev <- prob_ge2(p)
+    psev <- prob_ge2(p)
 
-    lesion <- lesion_name(nm)
-
-    if (p_sev >= 0.50 || cls >= 2) {
-      txt <- c(
-        txt,
-        paste0(
-          lesion, ": alta probabilidad de lesión moderada o grave ",
-          "(grado ≥2: ", round(100 * p_sev, 1), "%). ",
-          "Interpretar con especial cautela en el contexto del donante y considerar seguimiento estrecho."
-        )
-      )
-    } else if (p_sev >= 0.25) {
-      txt <- c(
-        txt,
-        paste0(
-          lesion, ": probabilidad intermedia de lesión moderada o grave ",
-          "(grado ≥2: ", round(100 * p_sev, 1), "%). ",
-          "Recomendable contextualizar con edad, comorbilidad y función renal del donante."
-        )
-      )
+    if (psev >= 0.50 || cls >= 2) {
+      txt <- c(txt, paste0(
+        lesion_name(nm), ": alta probabilidad de lesión moderada o grave ",
+        "(grado ≥2: ", round(100 * psev, 1), "%). Considerar seguimiento estrecho."
+      ))
+    } else if (psev >= 0.25) {
+      txt <- c(txt, paste0(
+        lesion_name(nm), ": probabilidad intermedia de lesión moderada/grave ",
+        "(grado ≥2: ", round(100 * psev, 1), "%). Interpretar según contexto clínico."
+      ))
     } else {
-      txt <- c(
-        txt,
-        paste0(
-          lesion, ": predominan grados ausente o leve. ",
-          "Clase predicha: ", grade_label(cls), "."
-        )
-      )
+      txt <- c(txt, paste0(
+        lesion_name(nm), ": predominan grados ausente o leve. Clase predicha: ",
+        grade_label(cls), "."
+      ))
     }
   }
 
   if (glo >= 20) {
-    txt <- c(
-      txt,
-      paste0(
-        "Glomeruloesclerosis estimada elevada: ", round(glo, 1),
-        "%. Este hallazgo virtual sugiere mayor carga crónica y debe interpretarse junto al resto de datos clínicos."
-      )
-    )
+    txt <- c(txt, paste0("Glomeruloesclerosis estimada elevada: ", round(glo, 1), "%."))
   } else if (glo >= 10) {
-    txt <- c(
-      txt,
-      paste0(
-        "Glomeruloesclerosis estimada intermedia: ", round(glo, 1),
-        "%. Puede justificar vigilancia adicional según el contexto clínico."
-      )
-    )
+    txt <- c(txt, paste0("Glomeruloesclerosis estimada intermedia: ", round(glo, 1), "%."))
   } else {
-    txt <- c(
-      txt,
-      paste0(
-        "Glomeruloesclerosis estimada baja: ", round(glo, 1),
-        "%."
-      )
-    )
+    txt <- c(txt, paste0("Glomeruloesclerosis estimada baja: ", round(glo, 1), "%."))
   }
 
   paste(txt, collapse = "\n\n")
 }
 
-# ============================================================
-# Interfaz
-# ============================================================
-
 ui <- fluidPage(
   tags$head(
     tags$style(HTML("
-      body {
-        background-color: #f6f8fb;
-        color: #1f2937;
-      }
-
+      body { background-color: #f6f8fb; color: #1f2937; }
       .main-title {
         background: linear-gradient(135deg, #19324a, #295c7a);
-        color: white;
-        padding: 22px;
-        border-radius: 16px;
-        margin-bottom: 20px;
+        color: white; padding: 22px; border-radius: 16px; margin-bottom: 20px;
       }
-
-      .main-title h1 {
-        margin-top: 0;
-        font-weight: 700;
-      }
-
+      .main-title h1 { margin-top: 0; font-weight: 700; }
       .panel-card {
-        background: white;
-        border-radius: 16px;
-        padding: 18px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-        margin-bottom: 16px;
+        background: white; border-radius: 16px; padding: 18px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 16px;
       }
-
       .warning-card {
-        background: #fff3cd;
-        border-left: 6px solid #f0ad4e;
-        padding: 14px;
-        border-radius: 10px;
-        margin-bottom: 16px;
+        background: #fff3cd; border-left: 6px solid #f0ad4e;
+        padding: 14px; border-radius: 10px; margin-bottom: 16px;
       }
-
       .ok-card {
-        background: #eaf7ee;
-        border-left: 6px solid #2e8b57;
-        padding: 14px;
-        border-radius: 10px;
-        margin-bottom: 16px;
+        background: #eaf7ee; border-left: 6px solid #2e8b57;
+        padding: 14px; border-radius: 10px; margin-bottom: 16px;
       }
-
-      .result-number {
-        font-size: 28px;
-        font-weight: 700;
-        color: #19324a;
-      }
-
-      .small-muted {
-        color: #6b7280;
-        font-size: 13px;
-      }
-
-      h3 {
-        font-weight: 700;
-        color: #19324a;
-      }
+      .result-number { font-size: 28px; font-weight: 700; color: #19324a; }
+      .small-muted { color: #6b7280; font-size: 13px; }
+      h3 { font-weight: 700; color: #19324a; }
     "))
   ),
 
@@ -479,185 +396,67 @@ ui <- fluidPage(
       )
     )
   } else {
-    div(
-      class = "ok-card",
-      strong("Modelos cargados correctamente. "),
-      span("La aplicación está lista para calcular predicciones.")
-    )
+    div(class = "ok-card", strong("Modelos cargados correctamente. "), span("La aplicación está lista para calcular predicciones."))
   },
 
   sidebarLayout(
     sidebarPanel(
       width = 4,
-
       div(
         class = "panel-card",
         h3("Datos del donante"),
 
-        numericInput(
-          inputId = "age",
-          label = "Edad del donante (años)",
-          value = 57,
-          min = 0,
-          max = 100,
-          step = 1
-        ),
-
-        selectInput(
-          inputId = "sex",
-          label = "Sexo",
-          choices = c("Mujer", "Hombre"),
-          selected = "Mujer"
-        ),
-
-        selectInput(
-          inputId = "donor_type",
-          label = "Tipo de donante",
-          choices = c("Vivo", "Fallecido"),
-          selected = "Fallecido"
-        ),
+        numericInput("age", "Edad del donante (años)", value = 57, min = 0, max = 100, step = 1),
+        selectInput("sex", "Sexo", choices = c("Mujer", "Hombre"), selected = "Mujer"),
+        selectInput("donor_type", "Tipo de donante", choices = c("Vivo", "Fallecido"), selected = "Fallecido"),
 
         conditionalPanel(
           condition = "input.donor_type == 'Fallecido'",
-
-          selectInput(
-            inputId = "vascular_death",
-            label = "Causa de muerte cerebrovascular",
-            choices = c("No", "Sí"),
-            selected = "Sí"
-          ),
-
-          selectInput(
-            inputId = "dcd",
-            label = "Causa de muerte circulatoria / DCD",
-            choices = c("No", "Sí"),
-            selected = "No"
-          )
+          selectInput("vascular_death", "Causa de muerte cerebrovascular", choices = c("No", "Sí"), selected = "Sí"),
+          selectInput("dcd", "Causa de muerte circulatoria / DCD", choices = c("No", "Sí"), selected = "No")
         ),
 
-        selectInput(
-          inputId = "hypertension",
-          label = "Hipertensión",
-          choices = c("No", "Sí"),
-          selected = "No"
-        ),
+        selectInput("hypertension", "Hipertensión", choices = c("No", "Sí"), selected = "No"),
+        selectInput("diabetes", "Diabetes mellitus", choices = c("No", "Sí"), selected = "No"),
+        selectInput("hcv", "Estado VHC", choices = c("No", "Sí"), selected = "No"),
+        numericInput("bmi", "Índice de masa corporal / BMI (kg/m²)", value = 20, min = 10, max = 70, step = 0.1),
+        numericInput("creatinine", "Creatinina sérica más baja (mg/dL)", value = 0.6, min = 0.1, max = 15, step = 0.1),
+        selectInput("proteinuria", "Proteinuria", choices = c("No", "Sí"), selected = "No"),
+        p(class = "small-muted", "Proteinuria positiva: tira reactiva ≥1 o UPCR ≥0.5 g/g."),
 
-        selectInput(
-          inputId = "diabetes",
-          label = "Diabetes mellitus",
-          choices = c("No", "Sí"),
-          selected = "No"
-        ),
-
-        selectInput(
-          inputId = "hcv",
-          label = "Estado VHC",
-          choices = c("No", "Sí"),
-          selected = "No"
-        ),
-
-        numericInput(
-          inputId = "bmi",
-          label = "Índice de masa corporal / BMI (kg/m²)",
-          value = 20,
-          min = 10,
-          max = 70,
-          step = 0.1
-        ),
-
-        numericInput(
-          inputId = "creatinine",
-          label = "Creatinina sérica más baja (mg/dL)",
-          value = 0.6,
-          min = 0.1,
-          max = 15,
-          step = 0.1
-        ),
-
-        selectInput(
-          inputId = "proteinuria",
-          label = "Proteinuria",
-          choices = c("No", "Sí"),
-          selected = "No"
-        ),
-
-        p(
-          class = "small-muted",
-          "Proteinuria positiva: tira reactiva ≥1 o UPCR ≥0.5 g/g."
-        ),
-
-        actionButton(
-          inputId = "calculate",
-          label = "Calcular biopsia virtual",
-          class = "btn-primary",
-          width = "100%"
-        )
+        actionButton("calculate", "Calcular biopsia virtual", class = "btn-primary", width = "100%")
       )
     ),
 
     mainPanel(
       width = 8,
-
       tabsetPanel(
         tabPanel(
           "Resultados",
           br(),
-
-          div(
-            class = "panel-card",
-            h3("Resumen de predicción"),
-            uiOutput("summary_cards")
-          ),
-
-          div(
-            class = "panel-card",
-            h3("Probabilidades por lesión y grado Banff"),
-            DT::DTOutput("probability_table")
-          ),
-
-          div(
-            class = "panel-card",
-            h3("Glomeruloesclerosis"),
-            htmlOutput("glo_output")
-          )
+          div(class = "panel-card", h3("Resumen de predicción"), uiOutput("summary_cards")),
+          div(class = "panel-card", h3("Probabilidades por lesión y grado Banff"), DT::DTOutput("probability_table")),
+          div(class = "panel-card", h3("Glomeruloesclerosis"), htmlOutput("glo_output"))
         ),
-
         tabPanel(
           "Gráfico radar",
           br(),
-          div(
-            class = "panel-card",
-            h3("Radar de probabilidades"),
-            plotlyOutput("radar_plot", height = "560px")
-          )
+          div(class = "panel-card", h3("Radar de probabilidades"), plotlyOutput("radar_plot", height = "560px"))
         ),
-
         tabPanel(
           "Nota clínica",
           br(),
-          div(
-            class = "panel-card",
-            h3("Interpretación clínica automática"),
-            verbatimTextOutput("clinical_note")
-          )
+          div(class = "panel-card", h3("Interpretación clínica automática"), verbatimTextOutput("clinical_note"))
         ),
-
         tabPanel(
           "Ayuda",
           br(),
           div(
             class = "panel-card",
             h3("Qué calcula esta aplicación"),
-            p("La aplicación estima, a partir de 11 variables del donante, las probabilidades de cada grado Banff para:"),
-            tags$ul(
-              tags$li("cv: arteriosclerosis."),
-              tags$li("ah: hialinosis arteriolar."),
-              tags$li("IFTA: fibrosis intersticial y atrofia tubular.")
-            ),
-            p("También estima el porcentaje continuo de glomeruloesclerosis."),
-
+            p("Estima probabilidades Banff para cv, ah e IFTA, y porcentaje continuo de glomeruloesclerosis."),
             h3("Advertencia"),
-            p("Esta herramienta reproduce un sistema predictivo de investigación. No sustituye la valoración clínica, histológica ni la decisión del equipo de trasplante.")
+            p("Herramienta predictiva de investigación. No sustituye la valoración clínica ni anatomopatológica.")
           )
         )
       )
@@ -665,32 +464,22 @@ ui <- fluidPage(
   )
 )
 
-# ============================================================
-# Servidor
-# ============================================================
-
 server <- function(input, output, session) {
 
   prediction_result <- eventReactive(input$calculate, {
-    validate(
-      need(models_available, "Faltan los archivos .rds en la carpeta models/.")
-    )
+    validate(need(models_available, "Faltan archivos .rds en la carpeta models/."))
 
     patient <- make_patient(input)
 
     probs <- list(
-      cv = try_predict_probability(loaded_models$cv, patient),
-      ah = try_predict_probability(loaded_models$ah, patient),
-      IFTA = try_predict_probability(loaded_models$IFTA, patient)
+      cv   = predict_probability_ensemble(loaded_models$cv, patient),
+      ah   = predict_probability_ensemble(loaded_models$ah, patient),
+      IFTA = predict_probability_ensemble(loaded_models$IFTA, patient)
     )
 
-    glo <- try_predict_regression(loaded_models$glo, patient)
+    glo <- predict_regression_ensemble(loaded_models$glo, patient)
 
-    list(
-      patient = patient,
-      probs = probs,
-      glo = glo
-    )
+    list(patient = patient, probs = probs, glo = glo)
   }, ignoreInit = FALSE)
 
   output$summary_cards <- renderUI({
@@ -704,14 +493,8 @@ server <- function(input, output, session) {
       div(
         style = "border-bottom: 1px solid #e5e7eb; padding: 12px 0;",
         h4(lesion_name(nm)),
-        tags$p(
-          tags$strong("Clase predicha: "),
-          grade_label(cls)
-        ),
-        tags$p(
-          tags$strong("Probabilidad de grado ≥2: "),
-          paste0(round(100 * psev, 1), "%")
-        )
+        tags$p(tags$strong("Clase predicha: "), grade_label(cls)),
+        tags$p(tags$strong("Probabilidad de grado ≥2: "), paste0(round(100 * psev, 1), "%"))
       )
     })
 
@@ -733,27 +516,12 @@ server <- function(input, output, session) {
       )
     })
 
-    DT::datatable(
-      tab,
-      rownames = FALSE,
-      options = list(
-        dom = "t",
-        pageLength = 3
-      )
-    )
+    DT::datatable(tab, rownames = FALSE, options = list(dom = "t", pageLength = 3))
   })
 
   output$glo_output <- renderUI({
     res <- prediction_result()
-
-    HTML(
-      paste0(
-        "<div class='result-number'>",
-        round(res$glo, 2),
-        "%</div>",
-        "<p>Porcentaje estimado de glomeruloesclerosis.</p>"
-      )
-    )
+    HTML(paste0("<div class='result-number'>", round(res$glo, 2), "%</div><p>Porcentaje estimado de glomeruloesclerosis.</p>"))
   })
 
   output$clinical_note <- renderText({
@@ -767,10 +535,8 @@ server <- function(input, output, session) {
     radar_data <- purrr::imap_dfr(res$probs, function(p, nm) {
       tibble::tibble(
         lesion = lesion_name(nm),
-        grado = factor(
-          c("Grado 0", "Grado 1", "Grado 2", "Grado 3"),
-          levels = c("Grado 0", "Grado 1", "Grado 2", "Grado 3")
-        ),
+        grado = factor(c("Grado 0", "Grado 1", "Grado 2", "Grado 3"),
+                       levels = c("Grado 0", "Grado 1", "Grado 2", "Grado 3")),
         prob = as.numeric(p[1, paste0("X", 0:3)])
       )
     })
@@ -778,33 +544,18 @@ server <- function(input, output, session) {
     plotly::plot_ly(type = "scatterpolar", mode = "lines+markers") %>%
       plotly::add_trace(
         data = radar_data[radar_data$lesion == "Arteriosclerosis (cv)", ],
-        r = ~prob,
-        theta = ~grado,
-        name = "cv",
-        fill = "toself"
+        r = ~prob, theta = ~grado, name = "cv", fill = "toself"
       ) %>%
       plotly::add_trace(
         data = radar_data[radar_data$lesion == "Hialinosis arteriolar (ah)", ],
-        r = ~prob,
-        theta = ~grado,
-        name = "ah",
-        fill = "toself"
+        r = ~prob, theta = ~grado, name = "ah", fill = "toself"
       ) %>%
       plotly::add_trace(
         data = radar_data[radar_data$lesion == "Fibrosis intersticial y atrofia tubular (IFTA)", ],
-        r = ~prob,
-        theta = ~grado,
-        name = "IFTA",
-        fill = "toself"
+        r = ~prob, theta = ~grado, name = "IFTA", fill = "toself"
       ) %>%
       plotly::layout(
-        polar = list(
-          radialaxis = list(
-            visible = TRUE,
-            range = c(0, 1),
-            tickformat = ".0%"
-          )
-        ),
+        polar = list(radialaxis = list(visible = TRUE, range = c(0, 1), tickformat = ".0%")),
         showlegend = TRUE,
         title = "Probabilidades predichas por grado Banff"
       )
