@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: virtual-biopsy-system
+    runtime: docker
+    plan: free
+    autoDeploy: true
