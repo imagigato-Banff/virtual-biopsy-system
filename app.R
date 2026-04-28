@@ -143,43 +143,38 @@ get_required_predictors <- function(model) {
 }
 
 prepare_newdata_for_model <- function(model, patient) {
-  pool <- make_pool(patient)
-  req <- get_required_predictors(model)
+  pool_num <- make_pool(patient)
 
-  nd <- data.frame(row.names = 1)
-
-  for (nm in req) {
-    if (nm %in% names(pool)) {
-      nd[[nm]] <- pool[[nm]]
-    } else {
-      # Si el modelo trae algún dummy no previsto, se fuerza a 0.
-      nd[[nm]] <- 0
-    }
+  pool_fac <- pool_num
+  binary_cols <- setdiff(names(pool_fac), c("Age", "Creatinine", "bmi"))
+  for (nm in binary_cols) {
+    pool_fac[[nm]] <- factor(as.character(pool_fac[[nm]]), levels = c("0", "1"))
   }
 
-  # Respeta tipos y niveles si caret guardó trainingData.
-  if (!is.null(model$trainingData)) {
-    td <- model$trainingData
-    for (nm in intersect(names(nd), names(td))) {
+  req <- get_required_predictors(model)
+  aligned_num <- data.frame(row.names = 1)
+  for (nm in req) {
+    aligned_num[[nm]] <- if (nm %in% names(pool_num)) pool_num[[nm]] else 0
+  }
+
+  aligned_fac <- aligned_num
+  if (!is.null(model)) {
+    td <- model
+    for (nm in intersect(names(aligned_fac), names(td))) {
       if (is.factor(td[[nm]])) {
         lev <- levels(td[[nm]])
-        val <- as.character(nd[[nm]][1])
-        if (!val %in% lev) {
-          # Para binarios 0/1, usa el nivel compatible.
-          if (length(lev) >= 2) {
-            val <- ifelse(as.numeric(nd[[nm]][1]) >= 0.5, lev[length(lev)], lev[1])
-          } else {
-            val <- lev[1]
-          }
-        }
-        nd[[nm]] <- factor(val, levels = lev)
+        val <- as.character(aligned_fac[[nm]][1])
+        if (!val %in% lev) val <- ifelse(suppressWarnings(as.numeric(aligned_fac[[nm]][1])) >= 0.5, tail(lev, 1), lev[1])
+        aligned_fac[[nm]] <- factor(val, levels = lev)
       } else {
-        nd[[nm]] <- suppressWarnings(as.numeric(nd[[nm]]))
+        aligned_fac[[nm]] <- suppressWarnings(as.numeric(aligned_fac[[nm]]))
       }
     }
   }
 
-  nd
+  # Devolvemos varias versiones. La clave para el error actual es que TODAS
+  # las versiones completas contienen Gender y Gender1 a la vez.
+  list(pool_num, pool_fac, aligned_num, aligned_fac)
 }
 
 clean_probability_output <- function(p) {
@@ -221,15 +216,19 @@ predict_probability_ensemble <- function(container, patient) {
   error_list <- c()
 
   for (m in internal_models) {
-    nd <- prepare_newdata_for_model(m, patient)
+    nd_list <- prepare_newdata_for_model(m, patient)
+    pred <- NULL
 
-    pred <- tryCatch(
-      predict(m, newdata = nd, type = "prob"),
-      error = function(e) {
-        error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
-        NULL
-      }
-    )
+    for (nd in nd_list) {
+      pred <- tryCatch(
+        predict(m, newdata = nd, type = "prob"),
+        error = function(e) {
+          error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
+          NULL
+        }
+      )
+      if (!is.null(pred)) break
+    }
 
     if (!is.null(pred)) {
       prob_list[[length(prob_list) + 1]] <- clean_probability_output(pred)
@@ -259,15 +258,19 @@ predict_regression_ensemble <- function(container, patient) {
   error_list <- c()
 
   for (m in internal_models) {
-    nd <- prepare_newdata_for_model(m, patient)
+    nd_list <- prepare_newdata_for_model(m, patient)
+    pred <- NULL
 
-    pred <- tryCatch(
-      predict(m, newdata = nd),
-      error = function(e) {
-        error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
-        NULL
-      }
-    )
+    for (nd in nd_list) {
+      pred <- tryCatch(
+        predict(m, newdata = nd),
+        error = function(e) {
+          error_list <<- c(error_list, paste(class(m)[1], conditionMessage(e)))
+          NULL
+        }
+      )
+      if (!is.null(pred)) break
+    }
 
     if (!is.null(pred)) {
       val <- suppressWarnings(as.numeric(pred[1]))
